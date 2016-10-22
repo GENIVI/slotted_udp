@@ -31,3 +31,5 @@
 # Debug files
 *.dSYM/
 *.su
+
+slotted_udp_test
