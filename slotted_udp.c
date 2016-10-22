@@ -14,26 +14,16 @@
 #include <memory.h>
 #include <stdio.h>
 
-s_udp_err_t s_udp_init_channel(s_udp_channel_t* channel,
-							   const char* address,
-							   in_port_t port,
-							   uint32_t slot,
-							   uint32_t min_latency,
-							   uint32_t max_latency,
-							   uint32_t min_frequency,
-							   uint32_t max_frequency,
-							   uint8_t is_sender)
+static s_udp_err_t _s_udp_init_common(s_udp_channel_t* channel,
+									  const char* address,
+									  in_port_t port,
+									  uint32_t slot)
 {
-	if (!channel || !address) {
-		fprintf(stderr, "s_udp_init_channel(): Illegal argument\n");
-		return S_UDP_ILLEGAL_ARGUMENT;
-	}
-	
 	// Setup address
 	memset(&channel->address, 0 , sizeof(channel->address));
 
 	if (!inet_aton(address, &channel->address.sin_addr)) {
-		fprintf(stderr, "s_udp_init_channel(): inet_aton(%s): Illegal address\n",
+		fprintf(stderr, "_s_udp_init_common(): inet_aton(%s): Illegal address\n",
 				address);
 		return S_UDP_ILLEGAL_ADDRESS;
 	}
@@ -43,17 +33,60 @@ s_udp_err_t s_udp_init_channel(s_udp_channel_t* channel,
 
 	// Setup other fields
 	channel->slot = slot;
+
+	return S_UDP_OK;
+}
+
+s_udp_err_t s_udp_init_send_channel(s_udp_channel_t* channel,
+									const char* address,
+									in_port_t port,
+									uint32_t slot,
+									uint32_t slot_count,
+									uint32_t min_latency,
+									uint32_t max_latency,
+									uint32_t min_frequency,
+									uint32_t max_frequency)
+{
+	if (!channel || !address) {
+		fprintf(stderr, "s_udp_init_send_channel(): Illegal argument\n");
+		return S_UDP_ILLEGAL_ARGUMENT;
+	}
+	
+	channel->is_sender = 1;
+	channel->slot_count = slot_count;
+	channel->socket_des = -1;
+
 	channel->min_latency = min_latency;
 	channel->max_latency = max_latency;
 
 	channel->min_frequency = min_frequency;
 	channel->max_frequency = max_frequency;
 
-	channel->is_sender = is_sender;
-	channel->socket_des = -1;
-	channel->slot_count = 0;
+	
+	return _s_udp_init_common(channel, address, port, slot);
+}
 
-	return S_UDP_OK;
+s_udp_err_t s_udp_init_receive_channel(s_udp_channel_t* channel,
+									   const char* address,
+									   in_port_t port,
+									   uint32_t slot)
+{
+	if (!channel || !address) {
+		fprintf(stderr, "s_udp_init_receive_channel(): Illegal argument\n");
+		return S_UDP_ILLEGAL_ARGUMENT;
+	}
+		
+	channel->is_sender = 0;
+	channel->slot_count = 0;
+	channel->socket_des = -1;
+
+	channel->min_latency = 0;
+	channel->max_latency = 0;
+
+	channel->min_frequency = 0;
+	channel->max_frequency = 0;
+
+	return _s_udp_init_common(channel, address, port, slot);
 }
 
 

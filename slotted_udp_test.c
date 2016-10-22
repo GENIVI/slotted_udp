@@ -21,12 +21,12 @@
 
 #define CHANNEL_DEFAULT_ADDRESS "224.0.0.123"
 #define CHANNEL_DEFAULT_PORT 49234
-#define SLOT_COUNT 65
+#define DEFAULT_SLOT_COUNT 65
 void usage(const char* name)
 {
 	fprintf(stderr, "Usage: %s -s [file_name] | -r [file_name]  [-S slot]\n", name);
 	fprintf(stderr, "  -S slot          Attach to the given slot (1-%d). Default 1\n\n",
-			SLOT_COUNT);
+			DEFAULT_SLOT_COUNT);
 	fprintf(stderr, "  -s [file_name]   Send file_name over the given slot.\n");
 	fprintf(stderr, "                   Stream from stdin if file_name is not specified.\n\n");
 	fprintf(stderr, "  -r [file_name]   Receive data from sender and write to file_name\n");
@@ -59,6 +59,7 @@ void send_data(s_udp_channel_t* channel, int input_fd)
 	}
 	return;
 }
+
 
 void recv_data(s_udp_channel_t* channel, int output_fd)
 {
@@ -93,6 +94,7 @@ int main(int argc, char* argv[])
 {
 	char is_sender = -1;
 	int slot = 1;
+	int slot_count = DEFAULT_SLOT_COUNT;
 	int opt;
 	s_udp_channel_t channel;
 	char recv_file[256];
@@ -100,8 +102,16 @@ int main(int argc, char* argv[])
 
 	recv_file[0] = 0;
 	send_file[0] = 0;
-	while ((opt = getopt(argc, argv, "s::r::S::")) != -1) {
+	while ((opt = getopt(argc, argv, "c:s::r::S:")) != -1) {
 		switch (opt) {
+		case 'r':
+			is_sender = 0;
+			if (optarg) {
+				strncpy(recv_file, optarg, sizeof(recv_file));
+				recv_file[sizeof(recv_file)-1] = 0;
+			}
+			break;
+
 
 		case 's':
 			is_sender = 1;
@@ -111,17 +121,12 @@ int main(int argc, char* argv[])
 			}
 			break;
 
-		case 'r':
-			is_sender = 0;
-			if (optarg) {
-				strncpy(recv_file, optarg, sizeof(recv_file));
-				recv_file[sizeof(recv_file)-1] = 0;
-			}
+		case 'S':
+			slot = atoi(optarg);
 			break;
 
-		case 'S':
-			if (optarg) 
-				slot = atoi(optarg);
+		case 'c':
+			slot_count = atoi(optarg);
 			break;
 
 		default: /* '?' */
@@ -136,20 +141,27 @@ int main(int argc, char* argv[])
 		exit(255);
 	}
 		
-	s_udp_init_channel(&channel,
-					   CHANNEL_DEFAULT_ADDRESS,
-					   CHANNEL_DEFAULT_PORT,
-					   slot,  // Channel slot
-					   1000,  // Minimum latency, in microseconds  
-					   10000, // Maximum latency, in microseconds
-					   100,   // Minimum packets per second
-					   150,   // Maximum packets per second
-					   is_sender);
 
-	s_udp_attach_channel(&channel);
+
 
 	if (is_sender) {
 		int read_fd = -1;
+		if (s_udp_init_send_channel(&channel,
+									CHANNEL_DEFAULT_ADDRESS,
+									CHANNEL_DEFAULT_PORT,
+									slot,  // Channel slot
+									slot_count, // Number of slots
+									1000,  // Minimum latency, in microseconds  
+									10000, // Maximum latency, in microseconds
+									100,   // Minimum packets per second
+									150)    // Maximum packets per second
+			!= S_UDP_OK)
+			exit(255);
+
+		if (s_udp_attach_channel(&channel) != S_UDP_OK)
+			exit(255);
+
+
 
 		if (send_file[0]) {
 			read_fd = open(send_file, O_RDONLY);
@@ -166,6 +178,16 @@ int main(int argc, char* argv[])
 	} else {
 
 		int write_fd = -1;
+
+		if (s_udp_init_receive_channel(&channel,
+									   CHANNEL_DEFAULT_ADDRESS,
+									   CHANNEL_DEFAULT_PORT,
+									   slot) != S_UDP_OK)
+			exit(255);
+
+		if (s_udp_attach_channel(&channel) != S_UDP_OK)
+			exit(255);
+			
 
 		if (recv_file[0]) {
 

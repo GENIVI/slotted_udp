@@ -44,15 +44,20 @@ typedef enum _s_udp_err_t {
 
 extern const char* s_udp_error_string(s_udp_err_t code);
 
-extern s_udp_err_t s_udp_init_channel(s_udp_channel_t*,
-									  const char* address,
-									  in_port_t port,
-									  uint32_t slot,
-									  uint32_t min_latency,
-									  uint32_t max_latency,
-									  uint32_t min_frequency,
-									  uint32_t max_frequency,
-									  uint8_t is_sender);
+extern s_udp_err_t s_udp_init_send_channel(s_udp_channel_t*,
+										   const char* address,
+										   in_port_t port,
+										   uint32_t slot,
+										   uint32_t slot_count,
+										   uint32_t min_latency,
+										   uint32_t max_latency,
+										   uint32_t min_frequency,
+										   uint32_t max_frequency);
+								 
+extern s_udp_err_t s_udp_init_receive_channel(s_udp_channel_t*,
+											  const char* address,
+											  in_port_t port,
+											  uint32_t slot);
 								 
 extern s_udp_err_t s_udp_attach_channel(s_udp_channel_t* channel);
 
