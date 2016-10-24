@@ -22,17 +22,18 @@ behind the API.
 
 # QUICK START
 
-	make
+	$ make
 
 	[Terminal 1 (Receiver)]
-	./slotted_udp_test -r -
+	$ ./slotted_udp_test -r -
 
 	[Terminal 2 (Receiver)]
-	./slotted_udp_test -r -
+	$ ./slotted_udp_test -r -
 
 	[Terminal 3 (Sender)]
-	./slotted_udp_test -s -
+	$ ./slotted_udp_test -s -
 	Hello world.
+	<ctrl-d>
 
 ## Usage
 	slotted_udp_test -s [file_name] | -r [file_name]  [-S slot]
