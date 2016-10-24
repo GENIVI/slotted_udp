@@ -25,34 +25,28 @@ behind the API.
 	make
 
 	[Terminal 1 (Receiver)]
-	./slotted_udp_test -r
+	./slotted_udp_test -r -
 
 	[Terminal 2 (Receiver)]
-	./slotted_udp_test -r
+	./slotted_udp_test -r -
 
 	[Terminal 3 (Sender)]
-	./slotted_udp_test -s
+	./slotted_udp_test -s -
 	Hello world.
 
 ## Usage
-	./slotted_udp_test -s [file_name] | -r [file_name]  [-S slot]
-	-S slot          Attach to the given slot (1-65). Default 1
-
-	-s [file_name]   Send file_name over the given slot.
-                     Stream from stdin if file_name is not specified.
-
-	-r [file_name]   Receive data from sender and write to file_name
-                     Stream to stdout if no file_name is specified
+	slotted_udp_test -s [file_name] | -r [file_name]  [-S slot]
+	  -S slot          Attach to the given slot (1-%d). Default 1
+	  -s [file_name]   Send file_name over the given slot.
+	                   Use '-' to stream from stdin. End with ctrl-d.
+	  -r [file_name]   Receive data from sender and write to file_name.
+	                   Use '-' to stream to stdout.
 
 # TODO
 * Command line arguments for port and address
 * Command line argument for slot count
 * Command line argument for max packet size
-* Sender to transmit clock
-* Reader to read clock to measure latency
 * TDMA slotting for sender
-* Reader to only process slot specced by s_udp_init_channel()
-* Report latency and frequency skew in s_udp_read_data()
 
 
 
