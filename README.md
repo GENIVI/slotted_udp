@@ -56,6 +56,18 @@ behind the API.
 
 
 
+# UDP/IP PACKET FORMAT
+
+Byte   | Name            | Type        |   Description
+-------|-----------------|-------------|------------------
+0-3    | slot            | uint32\_t   | Slot that the packet was sent in
+4-11   | transaction\_id | uint64\_t   | Incremental transaction ID
+12-19  | clock           | uint64\_t   | Monotonic clock of sender, in usec
+20-... | data            | opaque      | Data.
+
+The length of data is determined by subtracting 20 from the total length
+(header size) of the UDP/IP packet ereceived.
+
 
 
 
