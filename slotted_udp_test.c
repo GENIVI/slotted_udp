@@ -28,18 +28,14 @@ void usage(const char* name)
 	fprintf(stderr, "  -S slot          Attach to the given slot (1-%d). Default 1\n\n",
 			DEFAULT_SLOT_COUNT);
 	fprintf(stderr, "  -s [file_name]   Send file_name over the given slot.\n");
-	fprintf(stderr, "                   Stream from stdin if file_name is not specified.\n\n");
+	fprintf(stderr, "                   Use '-' to stream from stdin. End with ctrl-d.\n\n");
 	fprintf(stderr, "  -r [file_name]   Receive data from sender and write to file_name\n");
-	fprintf(stderr, "                   Stream to stdout if no file_name is specified\n\n");
+	fprintf(stderr, "                   Use '-' to stream to stdout.\n\n");
 
 	fprintf(stderr, "FIXME: Command line arguments for port and address\n");
 	fprintf(stderr, "FIXME: Command line argument for slot count\n");
 	fprintf(stderr, "FIXME: Command line argument for max packet size\n");
-	fprintf(stderr, "FIXME: Sender to transmit clock\n");
-	fprintf(stderr, "FIXME: Reader to read clock to measure latency\n");
 	fprintf(stderr, "FIXME: TDMA slotting for sender\n");
-	fprintf(stderr, "FIXME: Reader to only process slot specced by s_udp_init_channel()\n");
-	fprintf(stderr, "FIXME: Report latency and frequency skew in s_udp_read_data()\n");
 }
 
 void send_data(s_udp_channel_t* channel, int input_fd)
@@ -65,17 +61,18 @@ void recv_data(s_udp_channel_t* channel, int output_fd)
 {
 	uint8_t buffer[1024];
 	ssize_t rd_len = 0;
-	int32_t skew = 0;
-
+	uint32_t latency = 0;
+	uint8_t packet_loss_detected = 0;
 
 	while(1) {
 		s_udp_err_t res = S_UDP_OK;
 
-		res = s_udp_read_data(channel,
-							  buffer,
-							  sizeof(buffer),
-							  &rd_len,
-							  &skew);
+		res = s_udp_receive_packet(channel,
+								   buffer,
+								   sizeof(buffer),
+								   &rd_len,
+								   &latency,
+								   &packet_loss_detected);
 										  
 		if (rd_len == 0)
 			break;
@@ -84,7 +81,25 @@ void recv_data(s_udp_channel_t* channel, int output_fd)
 			perror(s_udp_error_string(res));
 			exit(255);
 		}
-		write(output_fd, buffer, rd_len);
+		if (output_fd != 1) {
+			printf("t_id[%.9lu] lat[%.5u] len[%.4ld] p_loss[%c]\n",
+				   channel->transaction_id,
+				   latency,
+				   rd_len,
+				   packet_loss_detected?'Y':'N');
+
+			write(output_fd, buffer, rd_len);
+		}
+		else {
+			buffer[rd_len] = 0;
+			printf("t_id[%.9lu] lat[%.5u] len[%.4ld] p_loss[%c]: %s%c",
+				   channel->transaction_id,
+				   latency,
+				   rd_len,
+				   packet_loss_detected?'Y':'N',
+				   buffer,
+				   (buffer[rd_len-1]=='\n')?0:'\n');
+		}
 	}
 	return;
 }
@@ -102,23 +117,19 @@ int main(int argc, char* argv[])
 
 	recv_file[0] = 0;
 	send_file[0] = 0;
-	while ((opt = getopt(argc, argv, "c:s::r::S:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:s:r:S:")) != -1) {
 		switch (opt) {
 		case 'r':
 			is_sender = 0;
-			if (optarg) {
-				strncpy(recv_file, optarg, sizeof(recv_file));
-				recv_file[sizeof(recv_file)-1] = 0;
-			}
+			strncpy(recv_file, optarg, sizeof(recv_file));
+			recv_file[sizeof(recv_file)-1] = 0;
 			break;
 
 
 		case 's':
 			is_sender = 1;
-			if (optarg) {
-				strncpy(send_file, optarg, sizeof(send_file));
-				send_file[sizeof(send_file)-1] = 0;
-			}
+			strncpy(send_file, optarg, sizeof(send_file));
+			send_file[sizeof(send_file)-1] = 0;
 			break;
 
 		case 'S':
@@ -142,18 +153,16 @@ int main(int argc, char* argv[])
 	}
 		
 
-
-
 	if (is_sender) {
 		int read_fd = -1;
 		if (s_udp_init_send_channel(&channel,
 									CHANNEL_DEFAULT_ADDRESS,
 									CHANNEL_DEFAULT_PORT,
-									slot,  // Channel slot
+									slot,   // Channel slot
 									slot_count, // Number of slots
-									1000,  // Minimum latency, in microseconds  
-									10000, // Maximum latency, in microseconds
-									100,   // Minimum packets per second
+									1000,   // Minimum latency, in microseconds
+									10000,  // Maximum latency, in microseconds
+									100,    // Minimum packets per second
 									150)    // Maximum packets per second
 			!= S_UDP_OK)
 			exit(255);
@@ -163,7 +172,7 @@ int main(int argc, char* argv[])
 
 
 
-		if (send_file[0]) {
+		if (strcmp(send_file, "-")) {
 			read_fd = open(send_file, O_RDONLY);
 			if (read_fd == -1) {
 				perror(send_file);
@@ -189,8 +198,7 @@ int main(int argc, char* argv[])
 			exit(255);
 			
 
-		if (recv_file[0]) {
-
+		if (strcmp(recv_file, "-")) {
 			write_fd = creat(recv_file, 0666);
 
 			if (write_fd == -1) {
