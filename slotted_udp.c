@@ -405,7 +405,11 @@ const char* s_udp_error_string(s_udp_err_t code)
 		"illegal address",          // S_UDP_ILLEGAL_ADDRESS
 		"subscription failure",     // S_UDP_SUBSCRIPTION_FAILURE
 		"illegal argument",         // S_UDP_ILLEGAL_ARGUMENT
-		"network error"             // S_UDP_NETWORK_ERROR
+		"network error",            // S_UDP_NETWORK_ERROR
+		"not connected",            // S_UDP_NOT_CONNECTED
+		"buffer too small",         // S_UDP_BUFFER_TOO_SMALL
+		"malformed packet",         // S_UDP_MALFORMED_PACKET
+		"slot mismatch",            // S_UDP_SLOT_MISMATCH
 	};
 
 	return err_string[code];
