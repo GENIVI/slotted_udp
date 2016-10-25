@@ -13,7 +13,6 @@
 #include <unistd.h>
 #include <memory.h>
 #include <stdio.h>
-#include <time.h>
 #include <endian.h>
 
 
@@ -52,11 +51,8 @@ static s_udp_err_t _init_common(s_udp_channel_t* channel,
 
 // destination must be at least _S_UDP_HEADER_LENGTH big
 static s_udp_err_t _encode_header(uint8_t* destination,
-								  struct timespec *tp,
 								  s_udp_channel_t* channel)
 {
-	uint64_t clock = ((uint64_t) tp->tv_sec) * 1000000LL + ((uint64_t) tp->tv_nsec) / 1000LL;
-
 	// Increment transaction ID.
 	++channel->transaction_id;
 
@@ -67,7 +63,7 @@ static s_udp_err_t _encode_header(uint8_t* destination,
 	*((uint64_t*) destination) = htobe64(channel->transaction_id);
 	destination += sizeof(uint64_t);
 
-	*((uint64_t*) destination) = htobe64(clock);
+	*((uint64_t*) destination) = htobe64( s_udp_get_master_clock(channel));
 	destination += sizeof(uint64_t);
 
 	return S_UDP_OK;
@@ -77,13 +73,13 @@ static s_udp_err_t _encode_header(uint8_t* destination,
 static s_udp_err_t _decode_header(uint8_t*  packet,
 								  uint32_t  packet_length,
 								  s_udp_channel_t* channel,
-								  struct timespec *tp,
 								  uint32_t* latency,
 								  uint8_t*  packet_loss_detected)
 {
 	uint64_t transaction_id = 0;
-	uint64_t clock = 0;
 	uint32_t slot = 0;
+	uint64_t clock;
+	
 
 	// Do we have enough data to carry a header?
 	if (packet_length < _S_UDP_HEADER_LENGTH)
@@ -125,10 +121,7 @@ static s_udp_err_t _decode_header(uint8_t*  packet,
 	clock = be64toh(*((uint64_t*) packet));
 
 	// Calculate latency
-	*latency = (uint32_t)
-		((uint64_t) tp->tv_sec) * 1000000LL +
-		((uint64_t) tp->tv_nsec) / 1000LL -
-		clock;
+	*latency = s_udp_get_master_clock(channel) - clock;
 
 	// printf("decode: slot:     %d\n",   slot);
 	// printf("decode: tid:      %lu\n", transaction_id);
@@ -263,7 +256,6 @@ s_udp_err_t s_udp_send_packet(s_udp_channel_t* channel, const uint8_t* data, uin
 {
 	uint8_t header[_S_UDP_HEADER_LENGTH];
 	s_udp_err_t enc_res = S_UDP_OK;
-	struct timespec tp;
 	struct msghdr message;
 	struct iovec payload_array[2];
 
@@ -277,9 +269,8 @@ s_udp_err_t s_udp_send_packet(s_udp_channel_t* channel, const uint8_t* data, uin
 		return S_UDP_NOT_SENDER;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &tp);
 
-	enc_res =_encode_header(header, &tp, channel);
+	enc_res =_encode_header(header, channel);
 	if (enc_res != S_UDP_OK) {
 		fprintf(stderr, "s_udp_send_packet(): _encode_header(): %s\n",
 				s_udp_error_string(enc_res));
@@ -323,7 +314,6 @@ s_udp_err_t s_udp_receive_packet(s_udp_channel_t* channel,
 {
 	uint8_t header[_S_UDP_HEADER_LENGTH];
 	s_udp_err_t dec_res = S_UDP_OK;
-	struct timespec tp;
 	struct msghdr message;
 	struct iovec payload_array[2];
 	struct sockaddr_in source_address;
@@ -359,13 +349,10 @@ s_udp_err_t s_udp_receive_packet(s_udp_channel_t* channel,
 		return S_UDP_NETWORK_ERROR;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &tp);
-
 	// Decode header.
 	dec_res = _decode_header(header,
 							 *length,
 							 channel,
-							 &tp,
 							 latency,
 							 packet_loss_detected);
 
@@ -392,6 +379,14 @@ s_udp_err_t s_udp_destroy_channel(s_udp_channel_t* channel)
 	channel->socket_des = -1;
 
 	return S_UDP_OK;
+}
+
+uint64_t s_udp_get_master_clock(s_udp_channel_t* channel)
+{
+	struct timespec tp;						 
+
+	clock_gettime(CLOCK_MONOTONIC, &tp);
+	return timespec2usec(tp);
 }
 
 

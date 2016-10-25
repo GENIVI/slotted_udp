@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 
 typedef struct _s_udp_channel_t {
@@ -48,9 +49,19 @@ typedef enum _s_udp_err_t {
 } s_udp_err_t;
 
 
+
+// Convert a struct filled out by clock_gettime(CLOCK_MONOTONIC,
+// struct timespec*) to microseconds.
+#define timespec2usec(tp) (((uint64_t) tp.tv_sec) * 1000000LL + \
+						   ((uint64_t) tp.tv_nsec) / 1000LL)
+
+
+// Return microseconds since arbitrary start point.
+extern uint64_t s_udp_get_master_clock(s_udp_channel_t* channel);
+
 extern const char* s_udp_error_string(s_udp_err_t code);
 
-extern s_udp_err_t s_udp_init_send_channel(s_udp_channel_t*,
+extern s_udp_err_t s_udp_init_send_channel(s_udp_channel_t* channel,
 										   const char* address,
 										   in_port_t port,
 										   uint32_t slot,
@@ -60,7 +71,7 @@ extern s_udp_err_t s_udp_init_send_channel(s_udp_channel_t*,
 										   uint32_t min_frequency,
 										   uint32_t max_frequency);
 								 
-extern s_udp_err_t s_udp_init_receive_channel(s_udp_channel_t*,
+extern s_udp_err_t s_udp_init_receive_channel(s_udp_channel_t* channel,
 											  const char* address,
 											  in_port_t port,
 											  uint32_t slot);
