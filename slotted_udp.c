@@ -14,7 +14,7 @@
 #include <memory.h>
 #include <stdio.h>
 #include <endian.h>
-
+#include <time.h>
 
 
 // Slot           - uint32_t
@@ -25,32 +25,144 @@
 	 sizeof(uint64_t) +     \
 	 sizeof(uint64_t))
 
-static s_udp_err_t _init_common(s_udp_channel_t* channel,
-								const char* address,
-								in_port_t port,
-								uint32_t slot)
+// Convert a struct filled out by clock_gettime(CLOCK_MONOTONIC,
+// struct timespec*) to microseconds.
+#define timespec2usec(tp) (((uint64_t) tp.tv_sec) * 1000000LL + \
+						   ((uint64_t) tp.tv_nsec) / 1000LL)
+
+
+
+
+// A send cycle defines the timespan during which all slots in
+// a channel will be able to send one package each.
+//
+// The send cycle duration is defined as:
+//   cycle_duration = slot_width * slot_count
+//
+//   - slot_count = Number of slots, as reported by master.
+//
+//   - slot_width = send interval of each slot, in usec, as 
+//                  reported by master.
+//
+//
+// Each cycle starts when:
+//
+//   master_clock mod cycle_duration == 0
+//
+//   - master_clock =  Our local real time clock, slaved to master's
+//                     clock, in usec since arbitrary start time.
+//
+// Example:
+// If slot_count==10 and slot_width == 100 usec, then
+// cycle_duration == slot_count[10] * slot_width[100] == 1000 usec
+//
+// With a cycle_duration of 1000 usec, then the send cycle starts:
+// when master_clock is:
+//
+//    cycle_start = uint64_t(master_clock / cycle_duration) * cycle_duration
+//
+// Example:
+// If master_clock==102343 and cycle_duration==1000, then cyclce_start is:
+//
+//    cycle_start = uint64_t(102343 / 1000) * 1000 = 102000
+//
+//
+// Within each send cycle, each slot's send window is defined as:
+//
+//   slot_start = cycle_start + slot * slot_width.
+//
+// The slot send window ends at:
+//
+//   slot_end = cycle_start + (slot+1) * slot_width
+//
+// The wait period between the current time, defined by master_clock,
+// and the start of the send window for a slot is defined as:
+//
+//   slot_wait = cycle_start + slot_start
+//
+// Please note that slot_start may already have passed in the current send cycle.
+// If that is the case, slot_start will be postponed cycle_duration usecs,
+// starting at the same point in the next send cycle.
+//
+static uint64_t _get_cycle_start(s_udp_channel_t* channel, uint64_t master_clock)
 {
-	// Setup address
-	memset(&channel->address, 0 , sizeof(channel->address));
+	uint64_t cycle_duration = channel->slot_width * channel->slot_count;
 
-	if (!inet_aton(address, &channel->address.sin_addr)) {
-		fprintf(stderr, "_init_common(): inet_aton(%s): Illegal address\n",
-				address);
-		return S_UDP_ILLEGAL_ADDRESS;
-	}
-
-	channel->address.sin_family = AF_INET;
-	channel->address.sin_port = htons(port);
-
-	// Setup other fields
-	channel->slot = slot;
-
-	channel->slot_count = 0;
-	channel->slot_width = 0;
-	channel->transaction_id = 0;
-	channel->master_clock_offset = 0;
-	return S_UDP_OK;
+	return master_clock / cycle_duration * cycle_duration;
 }
+
+static uint64_t _get_slot_start(s_udp_channel_t* channel, uint64_t master_clock)
+{
+	// When does our slot window start
+	uint64_t slot_start = 0;
+	uint64_t cycle_duration = channel->slot_width * channel->slot_count;
+	
+	slot_start = _get_cycle_start(channel, master_clock) + channel->slot_width * channel->slot;
+
+	// Have we already passed our send start window?
+	// Then wait until next cycle
+	if (slot_start < master_clock)
+		slot_start += cycle_duration;
+
+	return slot_start;
+}
+
+
+
+static uint8_t _is_in_slot_window(s_udp_channel_t* channel, uint64_t master_clock)
+{
+	uint64_t slot_start = 0;
+	
+	slot_start = _get_cycle_start(channel, master_clock) + channel->slot_width * channel->slot;
+
+	printf("offset[%lu] start[%lu] now[%lu] stop[%lu]\n",
+		   channel->master_clock_offset,
+		   slot_start,
+		   master_clock,
+		   slot_start + channel->slot_width);
+
+	if (slot_start < master_clock && slot_start + channel->slot_width > master_clock)
+		return 1;
+
+	return 0;
+			
+}
+
+
+s_udp_err_t s_udp_get_sleep_duration(s_udp_channel_t* channel,
+									 uint64_t* slot_wait)
+{
+	uint64_t slot_start = 0;
+	uint64_t cycle_start = 0;
+	uint64_t master_clock = 0;
+	
+	if (!channel || !slot_wait)
+		return S_UDP_ILLEGAL_ARGUMENT;
+	
+
+	master_clock = s_udp_get_master_clock(channel);
+	// When did the current cycle start
+	cycle_start = _get_cycle_start(channel, master_clock);
+
+	slot_start = _get_slot_start(channel, master_clock);
+
+	*slot_wait = slot_start - master_clock;
+
+
+	printf("offset[%lu] master_clock[%lu] cycle_start[%lu] slot_width[%u] slot_start[%u|%lu] slot_wait[%lu]\n",
+		   channel->master_clock_offset,
+		   master_clock,
+		   cycle_start,
+		   channel->slot_width, 
+		   channel->slot,
+		   slot_start,
+		   *slot_wait);
+
+	return S_UDP_OK;;
+	
+}
+
+
 
 
 // Process information received from slotted_udp_master program
@@ -58,20 +170,17 @@ static s_udp_err_t _init_common(s_udp_channel_t* channel,
 // See slotted_udp_master.c:send_clock() for encoding details
 //
 static s_udp_err_t _process_master(s_udp_channel_t* channel,
-								   uint64_t transaction_id,
+								   uint64_t transaction_id,	
 								   uint64_t master_clock)
 {
-	uint64_t local_clock = s_udp_get_monotonic_clock();
+	uint64_t local_clock = s_udp_get_local_clock();
 	uint64_t local_master_clock = 0;
 
-	printf("transaction_id[%lX]\n", transaction_id);
 	// Extract slot count
 	channel->slot_count = be32toh(transaction_id >> 32);
 
 	// Extract slot width (in usec)
 	channel->slot_width = be32toh((uint32_t) (transaction_id & 0x00000000FFFFFFFF));
-	printf("_process_master(): slot_count[%.4d] slot_width[%.6d]\n",
-		   channel->slot_count, channel->slot_width);
 
 	// If this is the first time we receive master clock,
 	// update offset to delta between self and master clock.
@@ -83,7 +192,10 @@ static s_udp_err_t _process_master(s_udp_channel_t* channel,
 
 	}
 
-	local_master_clock = local_clock - channel->master_clock_offset;
+	local_master_clock = s_udp_get_master_clock(channel);
+//	printf ("l_master[%ld] - r_master[%ld] = %ld offset[%ld]\n",
+//			local_master_clock, master_clock, master_clock - local_master_clock,
+//			channel->master_clock_offset);
 
 
 	// Assuming that both master and local clock do not skew
@@ -96,16 +208,12 @@ static s_udp_err_t _process_master(s_udp_channel_t* channel,
 	//
 	// Remember this in channel->master_clock_offset
 	//
-	printf("Transmitted master clock [%lu]\n", master_clock);
-	printf("Local       master clock [%lu]\n", local_master_clock);
-	
 	if (master_clock < local_master_clock) {
 		printf("_process_master(): Improved latency by [%lu] usec\n",
 			   local_master_clock - master_clock);
-		channel->master_clock_offset += (local_master_clock - master_clock);
+		channel->master_clock_offset+=10;
 	}
 
-	
 	return S_UDP_OK;
 }
 
@@ -134,14 +242,14 @@ static s_udp_err_t _decode_header(uint8_t*  packet,
 								  s_udp_channel_t* channel,
 								  uint32_t* latency,
 								  uint8_t*  packet_loss_detected,
-								  uint8_t*  master_detected)
+								  uint8_t*  master_packet_processed)
 {
 	uint64_t transaction_id = 0;
 	uint32_t slot = 0;
-	uint64_t clock;
+	uint64_t clock = 0;
+	uint64_t master_clock = 0;
+	*master_packet_processed = 0;
 
-	*master_detected = 0;
-	
 
 	// Do we have enough data to carry a header?
 	if (packet_length < _S_UDP_HEADER_LENGTH)
@@ -159,7 +267,6 @@ static s_udp_err_t _decode_header(uint8_t*  packet,
 	if (slot != channel->slot && slot != 0)
 		return S_UDP_SLOT_MISMATCH;
 
-	// Is this a slot 0 clock sync?
 
 	// ----
 	// Decode transaction id
@@ -177,11 +284,28 @@ static s_udp_err_t _decode_header(uint8_t*  packet,
 	// Is this a clock sync?
 	// If so decode and update channel
 	if (!slot) {
-		*master_detected = 1;
+		*master_packet_processed = 1;
 		return _process_master(channel, transaction_id, clock);
 	}
 
-	
+	// If we are the sender, we can safely dump any remaining packet
+	if (channel->is_sender) {
+		return S_UDP_TRY_AGAIN;
+	}
+
+
+	// Was this packet received within its slot send window?
+	master_clock = s_udp_get_master_clock(channel);
+
+	// If we don't have a clock sync yet from master, we cannot
+	// determine if we are in the send window.
+	if (!master_clock) {
+		return S_UDP_TRY_AGAIN;
+	}
+
+	if (!_is_in_slot_window(channel, master_clock))
+		return S_UDP_OUT_OF_SYNC;
+
 	// Check if we have packet loss.
 	// Detection can only be made if we have previously received a packet
 	// that we compare with, which is indicated by channel->transaction_id != 0.
@@ -205,56 +329,44 @@ static s_udp_err_t _decode_header(uint8_t*  packet,
 }
 
 
-s_udp_err_t s_udp_init_send_channel(s_udp_channel_t* channel,
-									const char* address,
-									in_port_t port,
-									uint32_t slot,
-									uint32_t slot_count,
-									uint32_t min_latency,
-									uint32_t max_latency,
-									uint32_t min_frequency,
-									uint32_t max_frequency)
+s_udp_err_t s_udp_init_channel(s_udp_channel_t* channel,
+							   uint8_t is_sender,
+							   const char* address,
+							   in_port_t port,
+							   uint32_t slot)
 {
 	if (!channel || !address) {
-		fprintf(stderr, "s_udp_init_send_channel(): Illegal argument\n");
+		fprintf(stderr, "s_udp_init_channel(): Illegal argument\n");
 		return S_UDP_ILLEGAL_ARGUMENT;
 	}
 	
-	channel->is_sender = 1;
-	channel->slot_count = slot_count;
 	channel->socket_des = -1;
 
-	channel->min_latency = min_latency;
-	channel->max_latency = max_latency;
+	if (is_sender)
+		channel->is_sender = 1;
+	else
+		channel->is_sender = 0;
 
-	channel->min_frequency = min_frequency;
-	channel->max_frequency = max_frequency;
+	// Setup address
+	memset(&channel->address, 0 , sizeof(channel->address));
 
-	
-	return _init_common(channel, address, port, slot);
-}
-
-s_udp_err_t s_udp_init_receive_channel(s_udp_channel_t* channel,
-									   const char* address,
-									   in_port_t port,
-									   uint32_t slot)
-{
-	if (!channel || !address) {
-		fprintf(stderr, "s_udp_init_receive_channel(): Illegal argument\n");
-		return S_UDP_ILLEGAL_ARGUMENT;
+	if (!inet_aton(address, &channel->address.sin_addr)) {
+		fprintf(stderr, "s_udp_init_channel(): inet_aton(%s): Illegal address\n",
+				address);
+		return S_UDP_ILLEGAL_ADDRESS;
 	}
-		
-	channel->is_sender = 0;
-	channel->slot_count = 0;
-	channel->socket_des = -1;
 
-	channel->min_latency = 0;
-	channel->max_latency = 0;
+	channel->address.sin_family = AF_INET;
+	channel->address.sin_port = htons(port);
 
-	channel->min_frequency = 0;
-	channel->max_frequency = 0;
+	// Setup other fields
+	channel->slot = slot;
+	channel->slot_count = 0;      // Will be set by master
+	channel->slot_width = 0;      // Will be set by master
+	channel->transaction_id = 0;
+	channel->master_clock_offset = 0; // Will be calculated based on master clock
 
-	return _init_common(channel, address, port, slot);
+	return S_UDP_OK;
 }
 
 
@@ -271,12 +383,7 @@ s_udp_err_t s_udp_attach_channel(s_udp_channel_t* channel)
 
 	channel->socket_des = socket(AF_INET, SOCK_DGRAM, 0);
 
-	if (channel->is_sender) {
-		return S_UDP_OK;
-	}
-
 	flag = 1;
-
 	if (setsockopt(channel->socket_des,
 				   SOL_SOCKET,
 				   SO_REUSEADDR,
@@ -327,19 +434,42 @@ s_udp_err_t s_udp_get_socket_descriptor(s_udp_channel_t* channel, int32_t* resul
 }
 
 
-s_udp_err_t s_udp_send_packet(s_udp_channel_t* channel, const uint8_t* payload, uint32_t length)
+s_udp_err_t s_udp_wait_and_send_packet(s_udp_channel_t* channel,
+									   const uint8_t* payload,
+									   uint32_t length) {
+	uint64_t sleep_duration = 0;
+	s_udp_err_t res = S_UDP_OK;
+
+	if (!channel) {
+		fprintf(stderr, "s_udp_send_packet(): Illegal argument (channel == 0)\n");
+		return S_UDP_ILLEGAL_ARGUMENT;
+	}
+
+	// Retrieve number of microseconds to sleep
+	res = s_udp_get_sleep_duration(channel,
+								   &sleep_duration);
+
+	if (res != S_UDP_OK) {
+		fprintf(stderr, "s_udp_send_packet(): s_udp_get_sleep_duration(): %s\n",
+				s_udp_error_string(res));
+		return res;
+	}
+		   
+	usleep(sleep_duration);
+	return s_udp_send_packet_now(channel, payload, length);
+}
+
+s_udp_err_t s_udp_send_packet_now(s_udp_channel_t* channel,
+								  const uint8_t* payload,
+								  uint32_t length)
 {
 	if (!channel) {
 		fprintf(stderr, "s_udp_send_packet(): Illegal argument (channel == 0)\n");
 		return S_UDP_ILLEGAL_ARGUMENT;
 	}
 
-	if (!channel->is_sender) {
-		fprintf(stderr, "s_udp_send_packet(): Illegal argument\n");
-		return S_UDP_NOT_SENDER;
-	}
+  	channel->transaction_id++;
 
-	channel->transaction_id++;
 	return s_udp_send_packet_raw(channel->socket_des,
 								 &channel->address,
 								 channel->slot,
@@ -396,7 +526,7 @@ s_udp_err_t s_udp_send_packet_raw(int socket_des,
 	message.msg_control = 0;
 	message.msg_controllen = 0;
 	message.msg_flags = 0;
-
+	
 	if (sendmsg(socket_des, &message, 0) < 0) {
 		perror("s_udp_send_packet(): sendmsg()");
 		return S_UDP_NETWORK_ERROR;
@@ -417,7 +547,7 @@ s_udp_err_t s_udp_receive_packet(s_udp_channel_t* channel,
 	struct msghdr message;
 	struct iovec payload_array[2];
 	struct sockaddr_in source_address;
-	uint8_t master_detected = 0;
+	uint8_t master_packet_processed = 0;
 
 	if (!length || !latency || !data ||
 		!channel || !packet_loss_detected) {
@@ -449,39 +579,39 @@ s_udp_err_t s_udp_receive_packet(s_udp_channel_t* channel,
 	// Continue to read until we get something else than
 	// a master (slot 0) packet.
 		
- 	while(1) {
-		if ((*length = recvmsg(channel->socket_des, &message, 0)) < 0) {
-			perror("s_udp_read_data(): recvfrom()");
-			return S_UDP_NETWORK_ERROR;
-		}
+	if ((*length = recvmsg(channel->socket_des, &message, 0)) < 0) {
+		perror("s_udp_read_data(): recvfrom()");
+		return S_UDP_NETWORK_ERROR;
+	}
 
-		// Decode header.
-		master_detected = 0;
-		dec_res = _decode_header(header,
-								 *length,
-								 channel,
-								 latency,
-								 packet_loss_detected,
-								 &master_detected);
+	// Decode header.
+	master_packet_processed = 0;
+	dec_res = _decode_header(header,
+							 *length,
+							 channel,
+							 latency,
+							 packet_loss_detected,
+							 &master_packet_processed);
 
-		if (dec_res != S_UDP_OK) {
+	if (dec_res != S_UDP_OK) {
+		if (dec_res != S_UDP_TRY_AGAIN)
 			fprintf(stderr, "s_udp_receive_packet(): _decode_header(): %s\n",
 					s_udp_error_string(dec_res));
-			return dec_res;
-		}
-
-		// Subtract header length from received data to
-		// get payload length
-		*length -= _S_UDP_HEADER_LENGTH;
-
-		// If this was a regular slot packet (slot != 0)
-		// break out of read loop.
-		if (!master_detected)
-			break;
-
-		// This was the master sending out an update, then
-		// Loop back and wait or the next package.
+		return dec_res;
 	}
+
+	// Subtract header length from received data to
+	// get payload length
+	*length -= _S_UDP_HEADER_LENGTH;
+
+	// If this was a regular slot packet (slot != 0)
+	// break out of read loop.
+	if (master_packet_processed) {
+		return S_UDP_TRY_AGAIN;
+	}
+
+	// This was the master sending out an update, then
+	// Loop back and wait or the next package.
 	return S_UDP_OK;
 }
 
@@ -501,10 +631,10 @@ uint64_t s_udp_get_master_clock(s_udp_channel_t* channel)
 	if (!channel->master_clock_offset)
 		return 0L;
 	
-	return s_udp_get_monotonic_clock() - channel->master_clock_offset;
+	return s_udp_get_local_clock() - channel->master_clock_offset;
 }
 
-uint64_t s_udp_get_monotonic_clock()
+uint64_t s_udp_get_local_clock()
 {
 	struct timespec tp;						 
 
@@ -517,6 +647,7 @@ const char* s_udp_error_string(s_udp_err_t code)
 {
 	static char *err_string[] = {
 		"ok",                       // S_UDP_OK
+		"try again",                // S_UDP_TRY_AGAIN
 		"not sender",               // S_UDP_NOT_SENDER 
 		"frequency violation",      // S_UDP_FREQUENCY_VIOLATION 
 		"latency violation",        // S_UDP_LATENCY_VIOLATION
@@ -528,6 +659,7 @@ const char* s_udp_error_string(s_udp_err_t code)
 		"buffer too small",         // S_UDP_BUFFER_TOO_SMALL
 		"malformed packet",         // S_UDP_MALFORMED_PACKET
 		"slot mismatch",            // S_UDP_SLOT_MISMATCH
+		"out of sync",              // S_UDP_OUT_OF_SYNC
 	};
 
 	return err_string[code];
