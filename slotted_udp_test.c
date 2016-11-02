@@ -28,7 +28,7 @@ void usage(const char* name)
 	fprintf(stderr, "  -S slot          Attach to the given slot. Default is 1\n\n");
 	fprintf(stderr, "  -s [file_name]   Send file_name over the given slot.\n");
 	fprintf(stderr, "                   Use '-' to stream from stdin. End with ctrl-d.\n\n");
-	fprintf(stderr, "  -r [file_name]   Receive data from sender and write to file_name\n");
+	fprintf(stderr, "  -r file_name     Receive data from sender and write to file_name\n");
 	fprintf(stderr, "                   Use '-' to stream to stdout.\n\n");
 
 	fprintf(stderr, "FIXME: Command line arguments for port and address\n");
@@ -40,13 +40,10 @@ void send_data(s_udp_channel_t* channel, int input_fd)
 {
 	uint8_t buffer[1024];
 	ssize_t rd_len = 0;
-	struct epoll_event ev[2];
+	struct epoll_event ev;
 	int epoll_des;
-	int nfds;
+	int nfds =0;
 	int32_t send_wait = -1;
-
-	/* Code to set up listening socket, 'listen_sock',
-	   (socket(), bind(), listen()) omitted */
 
 	epoll_des = epoll_create1(0);
 	if (epoll_des == -1) {
@@ -54,75 +51,58 @@ void send_data(s_udp_channel_t* channel, int input_fd)
 		exit(255);
 	}
 
-	ev[0].events = EPOLLIN;
-	ev[0].data.fd = channel->socket_des;
+	ev.events = EPOLLIN;
+	ev.data.fd = channel->socket_des;
 
-	if (epoll_ctl(epoll_des, EPOLL_CTL_ADD, channel->socket_des, &ev[0]) == -1) {
+	if (epoll_ctl(epoll_des, EPOLL_CTL_ADD, channel->socket_des, &ev) == -1) {
 		perror("epoll_ctl: channel desc");
 		exit(EXIT_FAILURE);
 	}
 
-	ev[1].events = EPOLLIN;
-	ev[1].data.fd = input_fd;
-	if (epoll_ctl(epoll_des, EPOLL_CTL_ADD, input_fd, &ev[1]) == -1) {
-		perror("epoll_ctl: input_fd");
-		exit(EXIT_FAILURE);
-
-	}
-	
 	// We need to read packet data from the channel to process
 	// slot 0 pacekts sent by the master.
 	while(1) {
-		int n;
+		uint64_t tmp_wait = 0;
 		ssize_t length = 0;
 		uint32_t latency = 0;
-		uint8_t packet_loss_detected;
-		uint64_t tmp_wait = 0;
+		uint8_t packet_loss_detected = 0;
 
 
-		nfds = epoll_wait(epoll_des, ev, 2, send_wait);
+		rd_len = read(input_fd, buffer, sizeof(buffer));
+
+		if (rd_len == 0) {
+			puts("Done reading");
+			break;
+		}
+
+		// Do we have data to transmit and are waiting
+		// for the send window to come into play?
+		printf("rd_len = %ld\n", rd_len);
+
+		s_udp_get_sleep_duration(channel, &tmp_wait);
+
+		send_wait = (int32_t) (tmp_wait / 1000) + 1;
+		printf("Will wait %d msec. master_clock[%lu]\n",
+			   send_wait, s_udp_get_master_clock(channel));
+
+		nfds = epoll_wait(epoll_des, &ev, 1, send_wait);
 		if (nfds == -1) {
 			perror("epoll_wait");
 			exit(EXIT_FAILURE);
 		}
 
-		if (send_wait != -1 && nfds == 0) {
-			printf("Sending %ld bytes\n", rd_len);
-			s_udp_send_packet_now(channel, buffer, rd_len);
-
-			send_wait = -1;
-			continue;
-		}
+		printf("Sending %ld bytes master_clock[%lu]\n", rd_len,
+			   s_udp_get_master_clock(channel));
+		s_udp_send_packet_now(channel, buffer, rd_len);
 		
-		for (n = 0; n < nfds; ++n) {
-			if (ev[n].data.fd == channel->socket_des) {
-				printf("Will read packet\n");
-				s_udp_receive_packet(channel,
-									 buffer,
-									 sizeof(buffer),
-									 &length,
-									 &latency,
-									 &packet_loss_detected);
-				continue;
-			}
-
-			if (ev[n].data.fd == input_fd) {
-				rd_len = read(input_fd, buffer, sizeof(buffer));
-				if (rd_len == -1) {
-					perror("read");
-					exit(255);
-				}
-
-				if (rd_len == 0)
-					return;
-
-				s_udp_get_sleep_duration(channel, &tmp_wait);
-				send_wait = (int32_t) (tmp_wait / 1000) + 1;
-				printf("Read %ld bytes, will wait %d msec\n", rd_len, send_wait);
-				continue;
-
-			}
-			printf("Unknown poll hit: %d\n", ev[n].data.fd);
+		if (nfds == 1) {
+			//printf("Will read packet\n");
+			s_udp_receive_packet(channel,
+								 buffer,
+								 sizeof(buffer),
+								 &length,
+								 &latency,
+								 &packet_loss_detected);
 		}
 	}
 	return;
@@ -159,6 +139,7 @@ void recv_data(s_udp_channel_t* channel, int output_fd)
 					s_udp_error_string(res));
 			exit(255);
 		}
+
 		if (output_fd != 1) {
 			printf("t_id[%.9lu] lat[%.5u] len[%.4ld] p_loss[%c]\n",
 				   channel->transaction_id,
@@ -236,18 +217,16 @@ int main(int argc, char* argv[])
 	if (s_udp_attach_channel(&channel) != S_UDP_OK)
 		exit(255);
 
+	s_udp_wait_for_channel_ready(&channel);
+
 	if (is_sender) {
 		int read_fd = -1;
 
-		if (strcmp(send_file, "-")) {
-			read_fd = open(send_file, O_RDONLY);
-			if (read_fd == -1) {
-				perror(send_file);
-				exit(255);
-			}
-		} else
-			read_fd = 0; // Stream from stdin.
-
+		read_fd = open(send_file, O_RDONLY);
+		if (read_fd == -1) {
+			perror(send_file);
+			exit(255);
+		}
 		send_data(&channel, read_fd);
 
 		close(read_fd);

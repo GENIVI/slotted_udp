@@ -46,6 +46,7 @@ typedef enum _s_udp_err_t {
 	S_UDP_MALFORMED_PACKET = 11,
 	S_UDP_SLOT_MISMATCH = 12,
 	S_UDP_OUT_OF_SYNC = 13,
+	S_UDP_NO_MASTER_CLOCK = 14,
 } s_udp_err_t;
 
 
@@ -68,12 +69,12 @@ extern s_udp_err_t s_udp_init_channel(s_udp_channel_t* channel,
 									  in_port_t port,
 									  uint32_t slot);
 								 
-extern s_udp_err_t s_udp_init_receive_channel(s_udp_channel_t* channel,
-											  const char* address,
-											  in_port_t port,
-											  uint32_t slot);
-								 
 extern s_udp_err_t s_udp_attach_channel(s_udp_channel_t* channel);
+
+extern s_udp_err_t s_udp_is_channel_ready(s_udp_channel_t* channel);
+
+extern s_udp_err_t s_udp_wait_for_channel_ready(s_udp_channel_t* channel);
+
 
 extern s_udp_err_t s_udp_get_socket_descriptor(s_udp_channel_t* channel,
 											   int32_t* result);

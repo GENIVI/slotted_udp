@@ -91,6 +91,7 @@ static uint64_t _get_cycle_start(s_udp_channel_t* channel, uint64_t master_clock
 	return master_clock / cycle_duration * cycle_duration;
 }
 
+
 static uint64_t _get_slot_start(s_udp_channel_t* channel, uint64_t master_clock)
 {
 	// When does our slot window start
@@ -418,6 +419,43 @@ s_udp_err_t s_udp_attach_channel(s_udp_channel_t* channel)
 }
 
 
+s_udp_err_t s_udp_wait_for_channel_ready(s_udp_channel_t* channel)
+{
+	uint8_t buffer[1024];
+	ssize_t length = 0;
+	uint32_t latency = 0;
+	uint8_t packet_loss_detected = 0;
+
+	while(s_udp_is_channel_ready(channel) != S_UDP_OK) {
+		puts("Waiting for master");
+		s_udp_receive_packet(channel,
+							 buffer,
+							 sizeof(buffer),
+							 &length,
+							 &latency,
+							 &packet_loss_detected);
+		
+		usleep(500000);
+	}
+	puts("We have master clock");
+	return S_UDP_OK;
+}
+
+
+s_udp_err_t s_udp_is_channel_ready(s_udp_channel_t* channel)
+{
+	if (!channel) {
+		fprintf(stderr, "s_udp_attach_channel(): Illegal argument\n");
+		return S_UDP_ILLEGAL_ARGUMENT;
+	}
+
+	if (channel->master_clock_offset == 0)
+		return S_UDP_NO_MASTER_CLOCK;
+
+	return S_UDP_OK;
+}
+
+
 s_udp_err_t s_udp_get_socket_descriptor(s_udp_channel_t* channel, int32_t* result)
 {
 	if (!result) {
@@ -468,7 +506,14 @@ s_udp_err_t s_udp_send_packet_now(s_udp_channel_t* channel,
 		return S_UDP_ILLEGAL_ARGUMENT;
 	}
 
+	// Have we received a master clock yet?
+	if (!channel->master_clock_offset) 
+		return S_UDP_NO_MASTER_CLOCK;
+	
   	channel->transaction_id++;
+
+	printf("s_udp_send_packet_raw(): master_clock[%lu]\n",
+		   s_udp_get_master_clock(channel));
 
 	return s_udp_send_packet_raw(channel->socket_des,
 								 &channel->address,
@@ -526,6 +571,7 @@ s_udp_err_t s_udp_send_packet_raw(int socket_des,
 	message.msg_control = 0;
 	message.msg_controllen = 0;
 	message.msg_flags = 0;
+	
 	
 	if (sendmsg(socket_des, &message, 0) < 0) {
 		perror("s_udp_send_packet(): sendmsg()");
@@ -660,6 +706,7 @@ const char* s_udp_error_string(s_udp_err_t code)
 		"malformed packet",         // S_UDP_MALFORMED_PACKET
 		"slot mismatch",            // S_UDP_SLOT_MISMATCH
 		"out of sync",              // S_UDP_OUT_OF_SYNC
+		"no master clock",              // S_UDP_OUT_OF_SYNC
 	};
 
 	return err_string[code];
